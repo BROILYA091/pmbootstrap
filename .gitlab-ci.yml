@@ -1,4 +1,4 @@
-image: alpine:latest
+image: alpine:edge
 
 # The mr-settings check needs to run in a MR specific context. With this block,
 # the whole pipeline runs in that context for MRs. Otherwise we would have two
@@ -17,7 +17,6 @@ before_script: &global_before_scripts
 
 stages:
   - lint
-  - deploy
   - test
 
 codespell:
@@ -33,14 +32,6 @@ pytest:
     - "su build -c 'git config --global user.name CI'"
     - "echo 'build ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers"
     - ".ci/pytest.sh"
-  after_script:
-    - "cp /home/build/.local/var/pmbootstrap/log_testsuite.txt ."
-    - "cp /home/build/.local/var/pmbootstrap/log.txt ."
-  artifacts:
-    when: on_failure
-    paths:
-      - "log_testsuite.txt"
-      - "log.txt"
 
 ruff:
   stage: lint
@@ -76,23 +67,8 @@ mypy:
 docs:
   stage: lint
   script:
-    - apk add py3-sphinx py3-sphinx_rtd_theme
-    - ".ci/docs.sh"
+  - apk add py3-sphinx py3-sphinx_rtd_theme
+  - ".ci/docs.sh"
   artifacts:
     paths:
-      - public
-
-deploy:
-  only:
-    - master
-  stage: deploy
-  before_script:
-    - apk -q add openssh-client rsync
-  script:
-    - mkdir "${HOME}/.ssh"
-    - echo "${SSH_HOST_KEY}" > "${HOME}/.ssh/known_hosts"
-    - echo "${SSH_PRIVATE_KEY}" > "${HOME}/.ssh/id_ed25519"
-    - chmod 700 "${HOME}/.ssh/id_ed25519"
-    - rsync -hrvz --delete -e "ssh -p ${SSH_PORT}" public/ "${SSH_HOST}":/var/www/docs.postmarketos.org/pmbootstrap/
-  environment:
-    name: deploy
+    - public

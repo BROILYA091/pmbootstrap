@@ -2,60 +2,49 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # PYTHON_ARGCOMPLETE_OK
 import sys
+import logging
 import os
 import traceback
-from typing import Any, Optional, TYPE_CHECKING
+from argparse import Namespace
 
 from pmb.helpers.exceptions import BuildFailedError, NonBugError
 
-if TYPE_CHECKING:
-    from pmb.types import PmbArgs
-
 from . import config
 from . import parse
-from . import types
 from .config import init as config_init
 from .helpers import frontend
-from .helpers import logging
+from .helpers import logging as pmb_logging
 from .helpers import mount
 from .helpers import other
-from .core import Chroot, Config
-from .core.context import get_context
-from .commands import run_command
 
 # pmbootstrap version
-__version__ = "3.0.0_alpha"
+__version__ = "2.3.1"
 
 # Python version check
 version = sys.version_info
 if version < (3, 9):
     print("You need at least Python 3.9 to run pmbootstrap")
-    print("(You are running it with Python " + str(version.major) + "." + str(version.minor) + ")")
+    print("(You are running it with Python " + str(version.major) +
+          "." + str(version.minor) + ")")
     sys.exit()
 
 
-def print_log_hint() -> None:
-    context = get_context(allow_failure=True)
-    log = context.log if context else Config().work / "log.txt"
+def print_log_hint(args: Namespace) -> None:
     # Hints about the log file (print to stdout only)
     log_hint = "Run 'pmbootstrap log' for details."
-    if not os.path.exists(log):
-        log_hint += (
-            " Alternatively you can use '--details-to-stdout' to get more"
-            " output, e.g. 'pmbootstrap --details-to-stdout init'."
-        )
+    if not args or not os.path.exists(args.log):
+        log_hint += (" Alternatively you can use '--details-to-stdout' to get more"
+                     " output, e.g. 'pmbootstrap --details-to-stdout init'.")
     print()
     print(log_hint)
 
 
-def main() -> int:
+def main():
     # Wrap everything to display nice error messages
-
-    args: PmbArgs
+    args = None
     try:
         # Parse arguments, set up logging
         args = parse.arguments()
-        context = get_context()
         os.umask(0o22)
 
         # Store script invocation command
@@ -70,13 +59,13 @@ def main() -> int:
         if args.action == "init":
             return config_init.frontend(args)
         elif not os.path.exists(args.config):
-            raise RuntimeError(
-                "Please specify a config file, or run" " 'pmbootstrap init' to generate one."
-            )
-        elif not os.path.exists(context.config.work):
-            raise RuntimeError(
-                "Work path not found, please run 'pmbootstrap" " init' to create it."
-            )
+            raise RuntimeError("Please specify a config file, or run"
+                               " 'pmbootstrap init' to generate one.")
+        elif not os.path.exists(args.work):
+            raise RuntimeError("Work path not found, please run 'pmbootstrap"
+                               " init' to create it.")
+
+        other.check_old_devices(args)
 
         # Migrate work folder if necessary
         if args.action not in ["shutdown", "zap", "log"]:
@@ -84,15 +73,14 @@ def main() -> int:
 
         # Run the function with the action's name (in pmb/helpers/frontend.py)
         if args.action:
-            run_command(args)
+            getattr(frontend, args.action)(args)
         else:
             logging.info("Run pmbootstrap -h for usage information.")
 
         # Still active notice
-        if mount.ismount(Chroot.native() / "dev"):
-            logging.info(
-                "NOTE: chroot is still active (use 'pmbootstrap" " shutdown' as necessary)"
-            )
+        if mount.ismount(args.work + "/chroot_native/dev"):
+            logging.info("NOTE: chroot is still active (use 'pmbootstrap"
+                         " shutdown' as necessary)")
         logging.info("DONE!")
 
     except KeyboardInterrupt:
@@ -105,28 +93,26 @@ def main() -> int:
 
     except BuildFailedError as exception:
         logging.error(f"ERROR: {exception}")
-        print_log_hint()
+        print_log_hint(args)
         return 3
 
     except Exception as e:
         # Dump log to stdout when args (and therefore logging) init failed
-        if "args" not in locals():
-            import logging as pylogging
-
-            pylogging.getLogger().setLevel(logging.DEBUG)
+        if not args:
+            logging.getLogger().setLevel(logging.DEBUG)
 
         logging.info("ERROR: " + str(e))
         logging.info("See also: <https://postmarketos.org/troubleshooting>")
         logging.debug(traceback.format_exc())
 
-        print_log_hint()
+        print_log_hint(args)
         print()
-        print("Before you report this error, ensure that pmbootstrap is " "up to date.")
-        print("Find the latest version here:" " https://github.com/BROILYA091/pmbootstrap/-/tags")
+        print("Before you report this error, ensure that pmbootstrap is "
+              "up to date.")
+        print("Find the latest version here:"
+              " https://github.com/BROILYA091/pmbootstrap/-/tags")
         print(f"Your version: {__version__}")
         return 1
-
-    return 0
 
 
 if __name__ == "__main__":

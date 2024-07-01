@@ -1,37 +1,32 @@
 # Copyright 2023 Nick Reitemeyer, Oliver Smith
 # SPDX-License-Identifier: GPL-3.0-or-later
-from pathlib import Path
 import pmb.aportgen.core
 import pmb.build
 import pmb.chroot.apk
 import pmb.chroot.apk_static
-from pmb.core.arch import Arch
 import pmb.helpers.run
 import pmb.parse.apkindex
-from pmb.core import Chroot
-from pmb.core.context import get_context
 
 
-def generate(pkgname):
+def generate(args, pkgname):
     arch = "x86"
     if pkgname != "grub-efi-x86":
         raise RuntimeError("only grub-efi-x86 is available")
-    package_data = pmb.parse.apkindex.package("grub")
+    package_data = pmb.parse.apkindex.package(args, "grub")
     version = package_data["version"]
     pkgver = version.split("-r")[0]
     pkgrel = version.split("-r")[1]
 
     # Prepare aportgen tempdir inside and outside of chroot
-    context = get_context()
-    tempdir = Path("/tmp/aportgen")
-    aportgen = context.config.work / "aportgen"
-    pmb.chroot.root(["rm", "-rf", tempdir])
-    pmb.helpers.run.user(["mkdir", "-p", aportgen, Chroot.native() / tempdir])
+    tempdir = "/tmp/aportgen"
+    pmb.chroot.root(args, ["rm", "-rf", tempdir])
+    pmb.helpers.run.user(args, ["mkdir", "-p", f"{args.work}/aportgen",
+                                f"{args.work}/chroot_native/{tempdir}"])
 
     # Write the APKBUILD
-    channel_cfg = pmb.config.pmaports.read_config_channel()
+    channel_cfg = pmb.config.pmaports.read_config_channel(args)
     mirrordir = channel_cfg["mirrordir_alpine"]
-    apkbuild_path = Chroot.native() / tempdir / "APKBUILD"
+    apkbuild_path = f"{args.work}/chroot_native/{tempdir}/APKBUILD"
     apk_name = f'"$srcdir/grub-efi-$pkgver-r$pkgrel-$_arch-{mirrordir}.apk"'
     with open(apkbuild_path, "w", encoding="utf-8") as handle:
         apkbuild = f"""\
@@ -48,7 +43,7 @@ def generate(pkgname):
             pkgdesc="GRUB $_arch EFI files for every architecture"
             url="https://www.gnu.org/software/grub/"
             license="GPL-3.0-or-later"
-            arch="{Arch.native()}"
+            arch="{pmb.config.arch_native}"
             source="grub-efi-$pkgver-r$pkgrel-$_arch-{mirrordir}.apk::$_mirror/{mirrordir}/main/$_arch/grub-efi-$pkgver-r$pkgrel.apk"
 
             package() {{
@@ -62,7 +57,7 @@ def generate(pkgname):
             handle.write(line[12:].replace(" " * 4, "\t") + "\n")
 
     # Generate checksums
-    pmb.build.init_abuild_minimal()
-    pmb.chroot.root(["chown", "-R", "pmos:pmos", tempdir])
-    pmb.chroot.user(["abuild", "checksum"], working_dir=tempdir)
-    pmb.helpers.run.user(["cp", apkbuild_path, aportgen])
+    pmb.build.init_abuild_minimal(args)
+    pmb.chroot.root(args, ["chown", "-R", "pmos:pmos", tempdir])
+    pmb.chroot.user(args, ["abuild", "checksum"], working_dir=tempdir)
+    pmb.helpers.run.user(args, ["cp", apkbuild_path, f"{args.work}/aportgen"])

@@ -1,26 +1,17 @@
 # Copyright 2023 Oliver Smith
 # SPDX-License-Identifier: GPL-3.0-or-later
-from pmb.core.context import get_context
-from pmb.parse.deviceinfo import Deviceinfo
 import pmb.helpers.run
 import pmb.aportgen.core
 import pmb.parse.apkindex
+import pmb.parse.arch
 
 
-def generate_apkbuild(pkgname: str, deviceinfo: Deviceinfo, patches: list[str]):
+def generate_apkbuild(args, pkgname, deviceinfo, patches):
     device = "-".join(pkgname.split("-")[1:])
-    carch = deviceinfo.arch.kernel()
+    carch = pmb.parse.arch.alpine_to_kernel(deviceinfo["arch"])
 
-    makedepends = [
-        "bash",
-        "bc",
-        "bison",
-        "devicepkg-dev",
-        "findutils",
-        "flex",
-        "openssl-dev",
-        "perl",
-    ]
+    makedepends = ["bash", "bc", "bison", "devicepkg-dev", "findutils", "flex",
+                   "openssl-dev", "perl"]
 
     build = """
             unset LDFLAGS
@@ -31,17 +22,18 @@ def generate_apkbuild(pkgname: str, deviceinfo: Deviceinfo, patches: list[str]):
             downstreamkernel_package "$builddir" "$pkgdir" "$_carch\" \\
                 "$_flavor" "$_outdir\""""
 
-    if deviceinfo.header_version == "2":
+    if deviceinfo.get("header_version") == "2":
         package += """
 
             make dtbs_install O="$_outdir" ARCH="$_carch" \\
                 INSTALL_DTBS_PATH="$pkgdir\"/boot/dtbs"""
 
-    if deviceinfo.bootimg_qcdt == "true":
+    if deviceinfo["bootimg_qcdt"] == "true":
         build += """\n
             # Master DTB (deviceinfo_bootimg_qcdt)"""
         vendors = ["spreadtrum", "exynos", "other"]
-        soc_vendor = pmb.helpers.cli.ask("SoC vendor", vendors, vendors[-1], complete=vendors)
+        soc_vendor = pmb.helpers.cli.ask("SoC vendor", vendors,
+                                         vendors[-1], complete=vendors)
         if soc_vendor == "spreadtrum":
             makedepends.append("dtbtool-sprd")
             build += """
@@ -65,8 +57,8 @@ def generate_apkbuild(pkgname: str, deviceinfo: Deviceinfo, patches: list[str]):
                 "$pkgdir"/boot/dt.img"""
 
     makedepends.sort()
-    makedepends_fmt = ("\n" + " " * 12).join(makedepends)
-    patches_str = ("\n" + " " * 12).join(patches)
+    makedepends = ("\n" + " " * 12).join(makedepends)
+    patches = ("\n" + " " * 12).join(patches)
     content = f"""\
         # Reference: <https://postmarketos.org/vendorkernel>
         # Kernel config based on: arch/{carch}/configs/(CHANGEME!)
@@ -74,15 +66,15 @@ def generate_apkbuild(pkgname: str, deviceinfo: Deviceinfo, patches: list[str]):
         pkgname={pkgname}
         pkgver=3.x.x
         pkgrel=0
-        pkgdesc="{deviceinfo.name} kernel fork"
-        arch="{deviceinfo.arch}"
+        pkgdesc="{deviceinfo["name"]} kernel fork"
+        arch="{deviceinfo["arch"]}"
         _carch="{carch}"
         _flavor="{device}"
         url="https://kernel.org"
         license="GPL-2.0-only"
         options="!strip !check !tracedeps pmb:cross-native"
         makedepends="
-            {makedepends_fmt}
+            {makedepends}
         "
 
         # Source
@@ -92,7 +84,7 @@ def generate_apkbuild(pkgname: str, deviceinfo: Deviceinfo, patches: list[str]):
         source="
             $pkgname-$_commit.tar.gz::https://github.com/LineageOS/$_repository/archive/$_commit.tar.gz
             $_config
-            {patches_str}
+            {patches}
         "
         builddir="$srcdir/$_repository-$_commit"
         _outdir="out"
@@ -112,18 +104,17 @@ def generate_apkbuild(pkgname: str, deviceinfo: Deviceinfo, patches: list[str]):
         """
 
     # Write the file
-    with (get_context().config.work / "aportgen/APKBUILD").open("w", encoding="utf-8") as hndl:
+    with open(f"{args.work}/aportgen/APKBUILD", "w", encoding="utf-8") as hndl:
         for line in content.rstrip().split("\n"):
             hndl.write(line[8:].replace(" " * 4, "\t") + "\n")
 
 
-def generate(pkgname: str):
+def generate(args, pkgname):
     device = "-".join(pkgname.split("-")[1:])
-    deviceinfo = pmb.parse.deviceinfo(device)
-    work = get_context().config.work
+    deviceinfo = pmb.parse.deviceinfo(args, device)
 
     # Symlink commonly used patches
-    pmb.helpers.run.user(["mkdir", "-p", work / "aportgen"])
+    pmb.helpers.run.user(args, ["mkdir", "-p", args.work + "/aportgen"])
     patches = [
         "gcc7-give-up-on-ilog2-const-optimizations.patch",
         "gcc8-fix-put-user.patch",
@@ -131,8 +122,8 @@ def generate(pkgname: str):
         "kernel-use-the-gnu89-standard-explicitly.patch",
     ]
     for patch in patches:
-        pmb.helpers.run.user(
-            ["ln", "-s", "../../.shared-patches/linux/" + patch, (work / "aportgen" / patch)]
-        )
+        pmb.helpers.run.user(args, ["ln", "-s",
+                                    "../../.shared-patches/linux/" + patch,
+                                    args.work + "/aportgen/" + patch])
 
-    generate_apkbuild(pkgname, deviceinfo, patches)
+    generate_apkbuild(args, pkgname, deviceinfo, patches)

@@ -29,24 +29,7 @@ version = {attr =  "pmb.__version__"}
 exclude = ["aports", "docs", "keys", "test", "test.pmb_test"]
 
 [tool.ruff]
+# E402: module import not on top of file, not possible for testcases
+# E722: do not use bare except
+lint.ignore=["E402", "E722"]
 line-length=100
-# Assume Python 3.9
-target-version = "py39"
-
-[tool.ruff.lint]
-extend-select = ["UP"]
-
-[tool.ruff.lint.extend-per-file-ignores]
-# F401: imported but unused, common for __init__.py files
-"__init__.py" = ["F401"]
-
-[tool.ruff.format]
-# Enable auto-formatting of code examples in docstrings.
-docstring-code-format = true
-
-[tool.pytest.ini_options]
-addopts = [
-    "--import-mode=importlib",
-    "--basetemp=.pytest_tmp"
-]
-

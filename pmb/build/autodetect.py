@@ -1,21 +1,15 @@
 # Copyright 2023 Oliver Smith
 # SPDX-License-Identifier: GPL-3.0-or-later
-from pathlib import Path
-from pmb.core.arch import Arch
-from pmb.helpers import logging
-from typing import Any, Optional, Union
+import logging
+import os
 
 import pmb.config
 import pmb.chroot.apk
 import pmb.helpers.pmaports
-from pmb.core import Chroot
-from pmb.core.context import get_context
-from pmb.meta import Cache
-from pmb.types import CrossCompileType
+import pmb.parse.arch
 
 
-# FIXME (#2324): type hint Arch
-def arch_from_deviceinfo(pkgname, aport: Path) -> Optional[Arch]:
+def arch_from_deviceinfo(args, pkgname, aport):
     """
     The device- packages are noarch packages. But it only makes sense to build
     them for the device's architecture, which is specified in the deviceinfo
@@ -26,25 +20,22 @@ def arch_from_deviceinfo(pkgname, aport: Path) -> Optional[Arch]:
     """
     # Require a deviceinfo file in the aport
     if not pkgname.startswith("device-"):
-        return None
-    deviceinfo = aport / "deviceinfo"
-    if not deviceinfo.exists():
-        return None
+        return
+    deviceinfo = aport + "/deviceinfo"
+    if not os.path.exists(deviceinfo):
+        return
 
     # Return its arch
     device = pkgname.split("-", 1)[1]
-    arch = pmb.parse.deviceinfo(device).arch
-    logging.verbose(f"{pkgname}: arch from deviceinfo: {arch}")
+    arch = pmb.parse.deviceinfo(args, device)["arch"]
+    logging.verbose(pkgname + ": arch from deviceinfo: " + arch)
     return arch
 
 
-@Cache("package")
-def arch(package: Union[str, dict[str, Any]]):
+def arch(args, pkgname):
     """
     Find a good default in case the user did not specify for which architecture
     a package should be built.
-
-    :param package: The name of the package or parsed APKBUILD
 
     :returns: arch string like "x86_64" or "armhf". Preferred order, depending
               on what is supported by the APKBUILD:
@@ -52,24 +43,20 @@ def arch(package: Union[str, dict[str, Any]]):
               * device arch (this will be preferred instead if build_default_device_arch is true)
               * first arch in the APKBUILD
     """
-    pkgname = package["pkgname"] if isinstance(package, dict) else package
-    aport = pmb.helpers.pmaports.find(pkgname)
-    if not aport:
-        raise FileNotFoundError(f"APKBUILD not found for {pkgname}")
-    ret = arch_from_deviceinfo(pkgname, aport)
+    aport = pmb.helpers.pmaports.find(args, pkgname)
+    ret = arch_from_deviceinfo(args, pkgname, aport)
     if ret:
         return ret
 
-    apkbuild = pmb.parse.apkbuild(aport) if isinstance(package, str) else package
+    apkbuild = pmb.parse.apkbuild(f"{aport}/APKBUILD")
     arches = apkbuild["arch"]
-    deviceinfo = pmb.parse.deviceinfo()
 
-    if get_context().config.build_default_device_arch:
-        preferred_arch = deviceinfo.arch
-        preferred_arch_2nd = Arch.native()
+    if args.build_default_device_arch:
+        preferred_arch = args.deviceinfo["arch"]
+        preferred_arch_2nd = pmb.config.arch_native
     else:
-        preferred_arch = Arch.native()
-        preferred_arch_2nd = deviceinfo.arch
+        preferred_arch = pmb.config.arch_native
+        preferred_arch_2nd = args.deviceinfo["arch"]
 
     if "noarch" in arches or "all" in arches or preferred_arch in arches:
         return preferred_arch
@@ -78,29 +65,30 @@ def arch(package: Union[str, dict[str, Any]]):
         return preferred_arch_2nd
 
     try:
-        arch_str = apkbuild["arch"][0]
-        return Arch.from_str(arch_str) if arch_str else Arch.native()
+        return apkbuild["arch"][0]
     except IndexError:
-        return Arch.native()
+        return None
 
 
-def chroot(apkbuild: dict[str, str], arch: Arch) -> Chroot:
-    if arch == Arch.native():
-        return Chroot.native()
+def suffix(apkbuild, arch):
+    if arch == pmb.config.arch_native:
+        return "native"
 
     if "pmb:cross-native" in apkbuild["options"]:
-        return Chroot.native()
+        return "native"
 
-    return Chroot.buildroot(arch)
+    return "buildroot_" + arch
 
 
-def crosscompile(apkbuild, arch: Arch) -> CrossCompileType:
-    """Decide the type of compilation necessary to build a given APKBUILD."""
-    if not get_context().cross:
+def crosscompile(args, apkbuild, arch, suffix):
+    """
+        :returns: None, "native", "crossdirect"
+    """
+    if not args.cross:
         return None
-    if not arch.cpu_emulation_required():
+    if not pmb.parse.arch.cpu_emulation_required(arch):
         return None
-    if arch.is_native() or "pmb:cross-native" in apkbuild["options"]:
+    if suffix == "native":
         return "native"
     if "!pmb:crossdirect" in apkbuild["options"]:
         return None

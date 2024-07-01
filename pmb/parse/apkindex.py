@@ -1,33 +1,16 @@
 # Copyright 2023 Oliver Smith
 # SPDX-License-Identifier: GPL-3.0-or-later
 import collections
-from typing import Any, Optional
-from collections.abc import Sequence
-from pmb.core.arch import Arch
-from pmb.core.context import get_context
-from pmb.helpers import logging
-from pathlib import Path
+import logging
+import os
 import tarfile
 import pmb.chroot.apk
 import pmb.helpers.package
 import pmb.helpers.repo
 import pmb.parse.version
 
-apkindex_map = {
-    "A": "arch",
-    "D": "depends",
-    "o": "origin",
-    "P": "pkgname",
-    "p": "provides",
-    "k": "provider_priority",
-    "t": "timestamp",
-    "V": "version",
-}
 
-required_apkindex_keys = ["arch", "pkgname", "version"]
-
-
-def parse_next_block(path: Path, lines: list[str]):
+def parse_next_block(path, lines, start):
     """Parse the next block in an APKINDEX.
 
     :param path: to the APKINDEX.tar.gz
@@ -35,7 +18,7 @@ def parse_next_block(path: Path, lines: list[str]):
                   function. Wrapped into a list, so it can be modified
                   "by reference". Example: [5]
     :param lines: all lines from the "APKINDEX" file inside the archive
-    :returns: dictionary with the following structure:
+    :returns: Dictionary with the following structure:
               ``{ "arch": "noarch", "depends": ["busybox-extras", "lddtree", ... ],
               "origin": "postmarketos-mkinitfs",
               "pkgname": "postmarketos-mkinitfs",
@@ -50,58 +33,67 @@ def parse_next_block(path: Path, lines: list[str]):
     :returns: None, when there are no more blocks
     """
     # Parse until we hit an empty line or end of file
-    ret: dict[str, Any] = {}
-    required_found = 0  # Count the required keys we found
-    line = ""
-    while len(lines):
-        # We parse backwards for performance (pop(0) is super slow)
-        line = lines.pop()
-        if not line:
-            continue
-        # Parse keys from the mapping
-        k = line[0]
-        key = apkindex_map.get(k, None)
-
-        # The checksum key is always the FIRST in the block, so when we find
-        # it we know we're done.
-        if k == "C":
+    ret = {}
+    mapping = {
+        "A": "arch",
+        "D": "depends",
+        "o": "origin",
+        "P": "pkgname",
+        "p": "provides",
+        "k": "provider_priority",
+        "t": "timestamp",
+        "V": "version",
+    }
+    end_of_block_found = False
+    for i in range(start[0], len(lines)):
+        # Check for empty line
+        start[0] = i + 1
+        line = lines[i]
+        if not isinstance(line, str):
+            line = line.decode()
+        if line == "\n":
+            end_of_block_found = True
             break
-        if key:
-            if key in ret:
-                raise RuntimeError(f"Key {key} specified twice in block: {ret}, file: {path}")
-            if key in required_apkindex_keys:
-                required_found += 1
-            ret[key] = line[2:]
+
+        # Parse keys from the mapping
+        for letter, key in mapping.items():
+            if line.startswith(letter + ":"):
+                if key in ret:
+                    raise RuntimeError(
+                        "Key " + key + " (" + letter + ":) specified twice"
+                        " in block: " + str(ret) + ", file: " + path)
+                ret[key] = line[2:-1]
 
     # Format and return the block
-    if not len(lines) and not ret:
-        return None
-
-    # Check for required keys
-    if required_found != len(required_apkindex_keys):
-        for key in required_apkindex_keys:
+    if end_of_block_found:
+        # Check for required keys
+        for key in ["arch", "pkgname", "version"]:
             if key not in ret:
-                raise RuntimeError(f"Missing required key '{key}' in block " f"{ret}, file: {path}")
-        raise RuntimeError(
-            f"Expected {len(required_apkindex_keys)} required keys,"
-            f" but found {required_found} in block: {ret}, file: {path}"
-        )
+                raise RuntimeError(f"Missing required key '{key}' in block "
+                                   f"{ret}, file: {path}")
 
-    # Format optional lists
-    for key in ["provides", "depends"]:
-        if key in ret and ret[key] != "":
-            # Ignore all operators for now
-            values = ret[key].split(" ")
-            ret[key] = []
-            for value in values:
-                for operator in [">", "=", "<", "~"]:
-                    if operator in value:
-                        value = value.split(operator)[0]
-                        break
-                ret[key].append(value)
-        else:
-            ret[key] = []
-    return ret
+        # Format optional lists
+        for key in ["provides", "depends"]:
+            if key in ret and ret[key] != "":
+                # Ignore all operators for now
+                values = ret[key].split(" ")
+                ret[key] = []
+                for value in values:
+                    for operator in [">", "=", "<", "~"]:
+                        if operator in value:
+                            value = value.split(operator)[0]
+                            break
+                    ret[key].append(value)
+            else:
+                ret[key] = []
+        return ret
+
+    # No more blocks
+    elif ret != {}:
+        raise RuntimeError("Last block in " + path + " does not end"
+                           " with a new line! Delete the file and"
+                           " try again. Last block: " + str(ret))
+    return None
 
 
 def parse_add_block(ret, block, alias=None, multiple_providers=True):
@@ -144,7 +136,7 @@ def parse_add_block(ret, block, alias=None, multiple_providers=True):
         ret[alias] = block
 
 
-def parse(path: Path, multiple_providers=True):
+def parse(path, multiple_providers=True):
     r"""Parse an APKINDEX.tar.gz file, and return its content as dictionary.
 
     :param path: path to an APKINDEX.tar.gz file or apk package database
@@ -154,7 +146,7 @@ def parse(path: Path, multiple_providers=True):
                                APKINDEX files from a repository (#1122), but
                                not when parsing apk's installed packages DB.
     :returns: (without multiple_providers)
-
+  
     Generic format:
         ``{ pkgname: block, ... }``
 
@@ -173,52 +165,43 @@ def parse(path: Path, multiple_providers=True):
 
     """
     # Require the file to exist
-    if not path.is_file():
-        logging.verbose(
-            "NOTE: APKINDEX not found, assuming no binary packages"
-            f" exist for that architecture: {path}"
-        )
+    if not os.path.isfile(path):
+        logging.verbose("NOTE: APKINDEX not found, assuming no binary packages"
+                        " exist for that architecture: " + path)
         return {}
 
     # Try to get a cached result first
-    lastmod = path.lstat().st_mtime
-    _cache_key = "multiple" if multiple_providers else "single"
-    key = cache_key(path)
-    if key in pmb.helpers.other.cache["apkindex"]:
-        cache = pmb.helpers.other.cache["apkindex"][key]
+    lastmod = os.path.getmtime(path)
+    cache_key = "multiple" if multiple_providers else "single"
+    if path in pmb.helpers.other.cache["apkindex"]:
+        cache = pmb.helpers.other.cache["apkindex"][path]
         if cache["lastmod"] == lastmod:
-            if _cache_key in cache:
-                return cache[_cache_key]
+            if cache_key in cache:
+                return cache[cache_key]
         else:
             clear_cache(path)
 
     # Read all lines
-    lines: Sequence[str]
     if tarfile.is_tarfile(path):
         with tarfile.open(path, "r:gz") as tar:
-            with tar.extractfile(tar.getmember("APKINDEX")) as handle:  # type:ignore[union-attr]
-                lines = handle.read().decode().splitlines()
+            with tar.extractfile(tar.getmember("APKINDEX")) as handle:
+                lines = handle.readlines()
     else:
-        with path.open("r", encoding="utf-8") as handle:
-            lines = handle.read().splitlines()
-
-    # The APKINDEX might be empty, for example if you run "pmbootstrap index" and have no local
-    # packages
-    if not lines:
-        return {}
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.readlines()
 
     # Parse the whole APKINDEX file
-    ret: dict[str, Any] = collections.OrderedDict()
-    if lines[-1] == "\n":
-        lines.pop()  # Strip the trailing newline
+    ret = collections.OrderedDict()
+    start = [0]
     while True:
-        block = parse_next_block(path, lines)
+        block = parse_next_block(path, lines, start)
         if not block:
             break
 
         # Skip virtual packages
         if "timestamp" not in block:
-            logging.verbose(f"Skipped virtual package {block} in" f" file: {path}")
+            logging.verbose("Skipped virtual package " + str(block) + " in"
+                            " file: " + path)
             continue
 
         # Add the next package and all aliases
@@ -228,14 +211,13 @@ def parse(path: Path, multiple_providers=True):
                 parse_add_block(ret, block, alias, multiple_providers)
 
     # Update the cache
-    key = cache_key(path)
-    if key not in pmb.helpers.other.cache["apkindex"]:
-        pmb.helpers.other.cache["apkindex"][key] = {"lastmod": lastmod}
-    pmb.helpers.other.cache["apkindex"][key][_cache_key] = ret
+    if path not in pmb.helpers.other.cache["apkindex"]:
+        pmb.helpers.other.cache["apkindex"][path] = {"lastmod": lastmod}
+    pmb.helpers.other.cache["apkindex"][path][cache_key] = ret
     return ret
 
 
-def parse_blocks(path: Path):
+def parse_blocks(path):
     """
     Read all blocks from an APKINDEX.tar.gz into a list.
 
@@ -249,42 +231,36 @@ def parse_blocks(path: Path):
     """
     # Parse all lines
     with tarfile.open(path, "r:gz") as tar:
-        with tar.extractfile(tar.getmember("APKINDEX")) as handle:  # type:ignore[union-attr]
-            lines = handle.read().decode().splitlines()
+        with tar.extractfile(tar.getmember("APKINDEX")) as handle:
+            lines = handle.readlines()
 
     # Parse lines into blocks
-    ret: list[str] = []
+    ret = []
+    start = [0]
     while True:
-        block = pmb.parse.apkindex.parse_next_block(path, lines)
+        block = pmb.parse.apkindex.parse_next_block(path, lines, start)
         if not block:
             return ret
         ret.append(block)
 
 
-def cache_key(path: Path):
-    return str(path.relative_to(get_context().config.work))
-
-
-def clear_cache(path: Path):
+def clear_cache(path):
     """
     Clear the APKINDEX parsing cache.
 
     :returns: True on successful deletion, False otherwise
     """
-    key = cache_key(path)
-    logging.verbose(f"Clear APKINDEX cache for: {key}")
-    if key in pmb.helpers.other.cache["apkindex"]:
-        del pmb.helpers.other.cache["apkindex"][key]
+    logging.verbose("Clear APKINDEX cache for: " + path)
+    if path in pmb.helpers.other.cache["apkindex"]:
+        del pmb.helpers.other.cache["apkindex"][path]
         return True
     else:
-        logging.verbose(
-            "Nothing to do, path was not in cache:"
-            + str(pmb.helpers.other.cache["apkindex"].keys())
-        )
+        logging.verbose("Nothing to do, path was not in cache:" +
+                        str(pmb.helpers.other.cache["apkindex"].keys()))
         return False
 
 
-def providers(package, arch: Optional[Arch] = None, must_exist=True, indexes=None):
+def providers(args, package, arch=None, must_exist=True, indexes=None):
     """
     Get all packages, which provide one package.
 
@@ -299,11 +275,12 @@ def providers(package, arch: Optional[Arch] = None, must_exist=True, indexes=Non
         block is the return value from parse_next_block() above.
     """
     if not indexes:
-        indexes = pmb.helpers.repo.apkindex_files(arch)
+        arch = arch or pmb.config.arch_native
+        indexes = pmb.helpers.repo.apkindex_files(args, arch)
 
     package = pmb.helpers.package.remove_operators(package)
 
-    ret: dict[str, Any] = collections.OrderedDict()
+    ret = collections.OrderedDict()
     for path in indexes:
         # Skip indexes not providing the package
         index_packages = parse(path)
@@ -317,20 +294,19 @@ def providers(package, arch: Optional[Arch] = None, must_exist=True, indexes=Non
             if provider_pkgname in ret:
                 version_last = ret[provider_pkgname]["version"]
                 if pmb.parse.version.compare(version, version_last) == -1:
-                    logging.verbose(
-                        f"{package}: provided by: {provider_pkgname}-{version}"
-                        f"in {path} (but {version_last} is higher)"
-                    )
+                    logging.verbose(package + ": provided by: " +
+                                    provider_pkgname + "-" + version + " in " +
+                                    path + " (but " + version_last + " is"
+                                    " higher)")
                     continue
 
             # Add the provider to ret
-            logging.verbose(f"{package}: provided by: {provider_pkgname}-{version} in {path}")
+            logging.verbose(package + ": provided by: " + provider_pkgname +
+                            "-" + version + " in " + path)
             ret[provider_pkgname] = provider
 
     if ret == {} and must_exist:
-        import os
-
-        logging.debug(f"Searched in APKINDEX files: {', '.join([os.fspath(x) for x in indexes])}")
+        logging.debug("Searched in APKINDEX files: " + ", ".join(indexes))
         raise RuntimeError("Could not find package '" + package + "'!")
 
     return ret
@@ -343,7 +319,7 @@ def provider_highest_priority(providers, pkgname):
     :param pkgname: the package name we are interested in (for the log message)
     """
     max_priority = 0
-    priority_providers: collections.OrderedDict[str, str] = collections.OrderedDict()
+    priority_providers = collections.OrderedDict()
     for provider_name, provider in providers.items():
         priority = int(provider.get("provider_priority", -1))
         if priority > max_priority:
@@ -355,8 +331,7 @@ def provider_highest_priority(providers, pkgname):
     if priority_providers:
         logging.debug(
             f"{pkgname}: picked provider(s) with highest priority "
-            f"{max_priority}: {', '.join(priority_providers.keys())}"
-        )
+            f"{max_priority}: {', '.join(priority_providers.keys())}")
         return priority_providers
 
     # None of the providers seems to have a provider_priority defined
@@ -375,12 +350,11 @@ def provider_shortest(providers, pkgname):
     if len(providers) != 1:
         logging.debug(
             f"{pkgname}: has multiple providers ("
-            f"{', '.join(providers.keys())}), picked shortest: {ret}"
-        )
+            f"{', '.join(providers.keys())}), picked shortest: {ret}")
     return providers[ret]
 
 
-def package(package, arch: Optional[Arch] = None, must_exist=True, indexes=None):
+def package(args, package, arch=None, must_exist=True, indexes=None):
     """
     Get a specific package's data from an apkindex.
 
@@ -399,7 +373,7 @@ def package(package, arch: Optional[Arch] = None, must_exist=True, indexes=None)
               or None when the package was not found.
     """
     # Provider with the same package
-    package_providers = providers(package, arch, must_exist, indexes)
+    package_providers = providers(args, package, arch, must_exist, indexes)
     if package in package_providers:
         return package_providers[package]
 
@@ -409,5 +383,6 @@ def package(package, arch: Optional[Arch] = None, must_exist=True, indexes=None)
 
     # No provider
     if must_exist:
-        raise RuntimeError("Package '" + package + "' not found in any" " APKINDEX.")
+        raise RuntimeError("Package '" + package + "' not found in any"
+                           " APKINDEX.")
     return None

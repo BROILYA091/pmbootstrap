@@ -1,36 +1,32 @@
 # Copyright 2023 Oliver Smith
 # SPDX-License-Identifier: GPL-3.0-or-later
-from pathlib import Path
 import pmb.aportgen.core
 import pmb.build
 import pmb.chroot.apk
 import pmb.chroot.apk_static
 import pmb.helpers.run
 import pmb.parse.apkindex
-from pmb.core import Chroot
-from pmb.core.context import get_context
 
 
-def generate(pkgname):
+def generate(args, pkgname):
     arch = pkgname.split("-")[1]
 
     # Parse musl version from APKINDEX
-    package_data = pmb.parse.apkindex.package("musl")
+    package_data = pmb.parse.apkindex.package(args, "musl")
     version = package_data["version"]
     pkgver = version.split("-r")[0]
     pkgrel = version.split("-r")[1]
 
     # Prepare aportgen tempdir inside and outside of chroot
-    work = get_context().config.work
-    tempdir = Path("/tmp/aportgen")
-    aportgen = work / "aportgen"
-    pmb.chroot.root(["rm", "-rf", tempdir])
-    pmb.helpers.run.user(["mkdir", "-p", aportgen, Chroot.native() / tempdir])
+    tempdir = "/tmp/aportgen"
+    pmb.chroot.root(args, ["rm", "-rf", tempdir])
+    pmb.helpers.run.user(args, ["mkdir", "-p", f"{args.work}/aportgen",
+                                f"{args.work}/chroot_native/{tempdir}"])
 
     # Write the APKBUILD
-    channel_cfg = pmb.config.pmaports.read_config_channel()
+    channel_cfg = pmb.config.pmaports.read_config_channel(args)
     mirrordir = channel_cfg["mirrordir_alpine"]
-    apkbuild_path = Chroot.native() / tempdir / "APKBUILD"
+    apkbuild_path = f"{args.work}/chroot_native/{tempdir}/APKBUILD"
     apk_name = f"$srcdir/musl-$pkgver-r$pkgrel-$_arch-{mirrordir}.apk"
     apk_dev_name = f"$srcdir/musl-dev-$pkgver-r$pkgrel-$_arch-{mirrordir}.apk"
     with open(apkbuild_path, "w", encoding="utf-8") as handle:
@@ -97,7 +93,7 @@ def generate(pkgname):
             handle.write(line[12:].replace(" " * 4, "\t") + "\n")
 
     # Generate checksums
-    pmb.build.init_abuild_minimal()
-    pmb.chroot.root(["chown", "-R", "pmos:pmos", tempdir])
-    pmb.chroot.user(["abuild", "checksum"], working_dir=tempdir)
-    pmb.helpers.run.user(["cp", apkbuild_path, aportgen])
+    pmb.build.init_abuild_minimal(args)
+    pmb.chroot.root(args, ["chown", "-R", "pmos:pmos", tempdir])
+    pmb.chroot.user(args, ["abuild", "checksum"], working_dir=tempdir)
+    pmb.helpers.run.user(args, ["cp", apkbuild_path, f"{args.work}/aportgen"])

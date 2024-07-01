@@ -1,101 +1,81 @@
 # Copyright 2023 Oliver Smith
 # SPDX-License-Identifier: GPL-3.0-or-later
+import glob
 import json
-from pathlib import Path
-from pmb.core.context import get_context
-from pmb.helpers import logging
+import logging
+import os
 import time
 
-from pmb.types import PathString
 import pmb.helpers.mount
 import pmb.helpers.run
 import pmb.chroot
-from pmb.core import Chroot
 
 
-def init():
-    if not Path("/sys/module/loop").is_dir():
-        pmb.helpers.run.root(["modprobe", "loop"])
-    for loopdevice in Path("/dev/").glob("loop*"):
-        if loopdevice.is_dir():
+def init(args):
+    if not os.path.isdir("/sys/module/loop"):
+        pmb.helpers.run.root(args, ["modprobe", "loop"])
+    for loopdevice in glob.glob("/dev/loop*"):
+        if os.path.isdir(loopdevice):
             continue
-        pmb.helpers.mount.bind_file(loopdevice, Chroot.native() / loopdevice)
+        pmb.helpers.mount.bind_file(args, loopdevice,
+                                    args.work + "/chroot_native/" + loopdevice)
 
 
-def mount(img_path: Path):
+def mount(args, img_path):
     """
     :param img_path: Path to the img file inside native chroot.
     """
-    logging.debug(f"(native) mount {img_path} (loop)")
+    logging.debug("(native) mount " + img_path + " (loop)")
 
     # Try to mount multiple times (let the kernel module initialize #1594)
     for i in range(0, 5):
         # Retry
         if i > 0:
-            logging.debug("loop module might not be initialized yet, retry in" " one second...")
+            logging.debug("loop module might not be initialized yet, retry in"
+                          " one second...")
             time.sleep(1)
 
         # Mount and return on success
-        init()
+        init(args)
 
-        losetup_cmd: list[PathString] = ["losetup", "-f", img_path]
-        sector_size = pmb.parse.deviceinfo().rootfs_image_sector_size
+        losetup_cmd = ["losetup", "-f", img_path]
+        sector_size = args.deviceinfo["rootfs_image_sector_size"]
         if sector_size:
             losetup_cmd += ["-b", str(int(sector_size))]
 
-        pmb.chroot.root(losetup_cmd, check=False)
+        pmb.chroot.root(args, losetup_cmd, check=False)
+        if device_by_back_file(args, img_path):
+            return
 
-        try:
-            return device_by_back_file(img_path)
-        except RuntimeError as e:
-            if i == 4:
-                raise e
-            pass
+    # Failure: raise exception
+    raise RuntimeError("Failed to mount loop device: " + img_path)
 
 
-def device_by_back_file(back_file: Path) -> Path:
+def device_by_back_file(args, back_file, auto_init=True):
     """
     Get the /dev/loopX device that points to a specific image file.
     """
 
     # Get list from losetup
-    losetup_output = pmb.chroot.root(["losetup", "--json", "--list"], output_return=True)
+    losetup_output = pmb.chroot.root(args, ["losetup", "--json", "--list"],
+                                     output_return=True, auto_init=auto_init)
     if not losetup_output:
-        raise RuntimeError("losetup failed")
+        return None
 
     # Find the back_file
     losetup = json.loads(losetup_output)
     for loopdevice in losetup["loopdevices"]:
-        if Path(loopdevice["back-file"]) == back_file:
-            return Path(loopdevice["name"])
-    raise RuntimeError(f"Failed to find loop device for {back_file}")
+        if loopdevice["back-file"] == back_file:
+            return loopdevice["name"]
+    return None
 
 
-def umount(img_path: Path):
+def umount(args, img_path, auto_init=True):
     """
     :param img_path: Path to the img file inside native chroot.
     """
-    device: Path
-    try:
-        device = device_by_back_file(img_path)
-    except RuntimeError:
+    device = device_by_back_file(args, img_path, auto_init)
+    if not device:
         return
-    logging.debug(f"(native) umount {device}")
-    pmb.chroot.root(["losetup", "-d", device])
-
-
-def detach_all():
-    """
-    Detach all loop devices used by pmbootstrap
-    """
-    losetup_output = pmb.helpers.run.root(["losetup", "--json", "--list"], output_return=True)
-    if not losetup_output:
-        return
-    losetup = json.loads(losetup_output)
-    work = get_context().config.work
-    for loopdevice in losetup["loopdevices"]:
-        print(loopdevice["back-file"])
-        if Path(loopdevice["back-file"]).is_relative_to(work):
-            pmb.helpers.run.root(["kpartx", "-d", loopdevice["name"]], check=False)
-            pmb.helpers.run.root(["losetup", "-d", loopdevice["name"]])
-    return
+    logging.debug("(native) umount " + device)
+    pmb.chroot.root(args, ["losetup", "-d", device], auto_init=auto_init)

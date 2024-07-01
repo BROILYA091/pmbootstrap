@@ -1,25 +1,76 @@
 # Copyright 2023 Oliver Smith
 # SPDX-License-Identifier: GPL-3.0-or-later
 import copy
-from pathlib import Path
-from typing import Optional
-from pmb.core.context import get_context
-from pmb.core.arch import Arch
-from pmb.helpers import logging
+import logging
 import os
 import pmb.config
-import pmb.helpers.other
 import pmb.helpers.devices
-from pmb.meta import Cache
 
 
-# FIXME: It feels weird to handle this at parse time.
-# we should instead have the Deviceinfo object store
-# the attributes for all kernels and require the user
-# to specify which one they're using.
-# Basically: treat Deviceinfo as a standalone type that
-# doesn't need to traverse pmaports.
-def _parse_kernel_suffix(info, device, kernel):
+def sanity_check(info, path):
+    # Resolve path for more readable error messages
+    path = os.path.realpath(path)
+
+    # Legacy errors
+    if "flash_methods" in info:
+        raise RuntimeError("deviceinfo_flash_methods has been renamed to"
+                           " deviceinfo_flash_method. Please adjust your"
+                           " deviceinfo file: " + path)
+    if "external_disk" in info or "external_disk_install" in info:
+        raise RuntimeError("Instead of deviceinfo_external_disk and"
+                           " deviceinfo_external_disk_install, please use the"
+                           " new variable deviceinfo_external_storage in your"
+                           " deviceinfo file: " + path)
+    if "msm_refresher" in info:
+        raise RuntimeError("It is enough to specify 'msm-fb-refresher' in the"
+                           " depends of your device's package now. Please"
+                           " delete the deviceinfo_msm_refresher line in: " +
+                           path)
+    if "flash_fastboot_vendor_id" in info:
+        raise RuntimeError("Fastboot doesn't allow specifying the vendor ID"
+                           " anymore (#1830). Try removing the"
+                           " 'deviceinfo_flash_fastboot_vendor_id' line in: " +
+                           path + " (if you are sure that you need this, then"
+                           " we can probably bring it back to fastboot, just"
+                           " let us know in the postmarketOS issues!)")
+    if "nonfree" in info:
+        raise RuntimeError("deviceinfo_nonfree is unused. "
+                           "Please delete it in: " + path)
+    if "dev_keyboard" in info:
+        raise RuntimeError("deviceinfo_dev_keyboard is unused. "
+                           "Please delete it in: " + path)
+    if "date" in info:
+        raise RuntimeError("deviceinfo_date was replaced by deviceinfo_year. "
+                           "Set it to the release year in: " + path)
+
+    # "codename" is required
+    codename = os.path.basename(os.path.dirname(path))
+    if codename.startswith("device-"):
+        codename = codename[7:]
+    if "codename" not in info or info["codename"] != codename:
+        raise RuntimeError(f"Please add 'deviceinfo_codename=\"{codename}\"' "
+                           f"to: {path}")
+
+    # "chassis" is required
+    chassis_types = pmb.config.deviceinfo_chassis_types
+    if "chassis" not in info or not info["chassis"]:
+        logging.info("NOTE: the most commonly used chassis types in"
+                     " postmarketOS are 'handset' (for phones) and 'tablet'.")
+        raise RuntimeError(f"Please add 'deviceinfo_chassis' to: {path}")
+
+    # "arch" is required
+    if "arch" not in info or not info["arch"]:
+        raise RuntimeError(f"Please add 'deviceinfo_arch' to: {path}")
+
+    # "chassis" validation
+    chassis_type = info["chassis"]
+    if chassis_type not in chassis_types:
+        raise RuntimeError(f"Unknown chassis type '{chassis_type}', should"
+                           f" be one of {', '.join(chassis_types)}. Fix this"
+                           f" and try again: {path}")
+
+
+def _parse_kernel_suffix(args, info, device, kernel):
     """
     Remove the kernel suffix (as selected in 'pmbootstrap init') from
     deviceinfo variables. Related:
@@ -39,7 +90,7 @@ def _parse_kernel_suffix(info, device, kernel):
     # Do nothing if the configured kernel isn't available in the kernel (e.g.
     # after switching from device with multiple kernels to device with only one
     # kernel)
-    kernels = pmb.parse._apkbuild.kernels(device)
+    kernels = pmb.parse._apkbuild.kernels(args, device)
     if not kernels or kernel not in kernels:
         logging.verbose(f"parse_kernel_suffix: {kernel} not in {kernels}")
         return info
@@ -47,7 +98,7 @@ def _parse_kernel_suffix(info, device, kernel):
     ret = copy.copy(info)
 
     suffix_kernel = kernel.replace("-", "_")
-    for key in Deviceinfo.__annotations__.keys():
+    for key in pmb.config.deviceinfo_attributes:
         key_kernel = f"{key}_{suffix_kernel}"
         if key_kernel not in ret:
             continue
@@ -60,220 +111,46 @@ def _parse_kernel_suffix(info, device, kernel):
     return ret
 
 
-@Cache("device", "kernel")
-def deviceinfo(device=None, kernel=None) -> "Deviceinfo":
+def deviceinfo(args, device=None, kernel=None):
     """
     :param device: defaults to args.device
     :param kernel: defaults to args.kernel
     """
-    context = get_context()
     if not device:
-        device = context.config.device
+        device = args.device
     if not kernel:
-        kernel = context.config.kernel
+        kernel = args.kernel
 
-    path = pmb.helpers.devices.find_path(device, "deviceinfo")
+    if not os.path.exists(args.aports):
+        logging.fatal(f"Aports directory is missing, expected: {args.aports}")
+        logging.fatal("Please provide a path to the aports directory using the"
+                      " -p flag")
+        raise RuntimeError("Aports directory missing")
+
+    path = pmb.helpers.devices.find_path(args, device, 'deviceinfo')
     if not path:
         raise RuntimeError(
             "Device '" + device + "' not found. Run 'pmbootstrap init' to"
             " start a new device port or to choose another device. It may have"
-            " been renamed, see <https://postmarketos.org/renamed>"
-        )
+            " been renamed, see <https://postmarketos.org/renamed>")
 
-    return Deviceinfo(path, kernel)
+    ret = {}
+    with open(path) as handle:
+        for line in handle:
+            if not line.startswith("deviceinfo_"):
+                continue
+            if "=" not in line:
+                raise SyntaxError(f"{path}: No '=' found:\n\t{line}")
+            split = line.split("=", 1)
+            key = split[0][len("deviceinfo_"):]
+            value = split[1].replace("\"", "").replace("\n", "")
+            ret[key] = value
 
+    # Assign empty string as default
+    for key in pmb.config.deviceinfo_attributes:
+        if key not in ret:
+            ret[key] = ""
 
-class Deviceinfo:
-    """Variables from deviceinfo. Reference: <https://postmarketos.org/deviceinfo>
-    Many of these are unused in pmbootstrap, and still more that are described
-    on the wiki are missing. Eventually this class and associated code should
-    be moved to a separate library and become the authoritative source of truth
-    for the deviceinfo format."""
-
-    path: Path
-    # general
-    format_version: str
-    name: str
-    manufacturer: str
-    codename: str
-    year: str
-    dtb: str
-    arch: Arch
-
-    # device
-    chassis: str
-    keyboard: Optional[str] = ""
-    external_storage: Optional[str] = ""
-    gpu_accelerated: Optional[bool] = False
-    dev_touchscreen: Optional[str] = ""
-    dev_touchscreen_calibration: Optional[str] = ""
-    append_dtb: Optional[str] = ""
-
-    # bootloader
-    flash_method: str = ""
-    boot_filesystem: Optional[str] = ""
-
-    # flash
-    flash_heimdall_partition_kernel: Optional[str] = ""
-    flash_heimdall_partition_initfs: Optional[str] = ""
-    flash_heimdall_partition_rootfs: Optional[str] = ""
-    flash_heimdall_partition_system: Optional[str] = ""  # deprecated
-    flash_heimdall_partition_vbmeta: Optional[str] = ""
-    flash_heimdall_partition_dtbo: Optional[str] = ""
-    flash_fastboot_partition_kernel: Optional[str] = ""
-    flash_fastboot_partition_rootfs: Optional[str] = ""
-    flash_fastboot_partition_system: Optional[str] = ""  # deprecated
-    flash_fastboot_partition_vbmeta: Optional[str] = ""
-    flash_fastboot_partition_dtbo: Optional[str] = ""
-    flash_rk_partition_kernel: Optional[str] = ""
-    flash_rk_partition_rootfs: Optional[str] = ""
-    flash_rk_partition_system: Optional[str] = ""  # deprecated
-    flash_mtkclient_partition_kernel: Optional[str] = ""
-    flash_mtkclient_partition_rootfs: Optional[str] = ""
-    flash_mtkclient_partition_vbmeta: Optional[str] = ""
-    flash_mtkclient_partition_dtbo: Optional[str] = ""
-    generate_legacy_uboot_initfs: Optional[str] = ""
-    kernel_cmdline: Optional[str] = ""
-    generate_bootimg: Optional[str] = ""
-    header_version: Optional[str] = ""
-    bootimg_qcdt: Optional[str] = ""
-    bootimg_mtk_mkimage: Optional[str] = ""  # deprecated
-    bootimg_mtk_label_kernel: Optional[str] = ""
-    bootimg_mtk_label_ramdisk: Optional[str] = ""
-    bootimg_dtb_second: Optional[str] = ""
-    bootimg_custom_args: Optional[str] = ""
-    flash_offset_base: Optional[str] = ""
-    flash_offset_dtb: Optional[str] = ""
-    flash_offset_kernel: Optional[str] = ""
-    flash_offset_ramdisk: Optional[str] = ""
-    flash_offset_second: Optional[str] = ""
-    flash_offset_tags: Optional[str] = ""
-    flash_pagesize: Optional[str] = ""
-    flash_fastboot_max_size: Optional[str] = ""
-    flash_sparse: Optional[str] = ""
-    flash_sparse_samsung_format: Optional[str] = ""
-    rootfs_image_sector_size: Optional[str] = ""
-    sd_embed_firmware: Optional[str] = ""
-    sd_embed_firmware_step_size: Optional[str] = ""
-    partition_blacklist: Optional[str] = ""
-    boot_part_start: Optional[str] = ""
-    partition_type: Optional[str] = ""
-    root_filesystem: Optional[str] = ""
-    flash_kernel_on_update: Optional[str] = ""
-    cgpt_kpart: Optional[str] = ""
-    cgpt_kpart_start: Optional[str] = ""
-    cgpt_kpart_size: Optional[str] = ""
-
-    # weston
-    weston_pixman_type: Optional[str] = ""
-
-    # keymaps
-    keymaps: Optional[str] = ""
-
-    @staticmethod
-    def __validate(info: dict[str, str], path: Path):
-        # Resolve path for more readable error messages
-        path = path.resolve()
-
-        # Legacy errors
-        if "flash_methods" in info:
-            raise RuntimeError(
-                "deviceinfo_flash_methods has been renamed to"
-                " deviceinfo_flash_method. Please adjust your"
-                f" deviceinfo file: {path}"
-            )
-        if "external_disk" in info or "external_disk_install" in info:
-            raise RuntimeError(
-                "Instead of deviceinfo_external_disk and"
-                " deviceinfo_external_disk_install, please use the"
-                " new variable deviceinfo_external_storage in your"
-                f" deviceinfo file: {path}"
-            )
-        if "msm_refresher" in info:
-            raise RuntimeError(
-                "It is enough to specify 'msm-fb-refresher' in the"
-                " depends of your device's package now. Please"
-                " delete the deviceinfo_msm_refresher line in: "
-                f"{path}"
-            )
-        if "flash_fastboot_vendor_id" in info:
-            raise RuntimeError(
-                "Fastboot doesn't allow specifying the vendor ID"
-                " anymore (#1830). Try removing the"
-                " 'deviceinfo_flash_fastboot_vendor_id' line in: "
-                f"{path} (if you are sure that you need this, then"
-                " we can probably bring it back to fastboot, just"
-                " let us know in the postmarketOS issues!)"
-            )
-        if "nonfree" in info:
-            raise RuntimeError("deviceinfo_nonfree is unused. " f"Please delete it in: {path}")
-        if "dev_keyboard" in info:
-            raise RuntimeError("deviceinfo_dev_keyboard is unused. " f"Please delete it in: {path}")
-        if "date" in info:
-            raise RuntimeError(
-                "deviceinfo_date was replaced by deviceinfo_year. "
-                f"Set it to the release year in: {path}"
-            )
-
-        # "codename" is required
-        codename = os.path.basename(os.path.dirname(path))[7:]
-        if "codename" not in info or info["codename"] != codename:
-            raise RuntimeError(f"Please add 'deviceinfo_codename=\"{codename}\"' " f"to: {path}")
-
-        # "chassis" is required
-        chassis_types = pmb.config.deviceinfo_chassis_types
-        if "chassis" not in info or not info["chassis"]:
-            logging.info(
-                "NOTE: the most commonly used chassis types in"
-                " postmarketOS are 'handset' (for phones) and 'tablet'."
-            )
-            raise RuntimeError(f"Please add 'deviceinfo_chassis' to: {path}")
-
-        # "arch" is required
-        if "arch" not in info or not info["arch"]:
-            raise RuntimeError(f"Please add 'deviceinfo_arch' to: {path}")
-
-        arch = Arch.from_str(info["arch"])
-        if not arch.is_native() and arch not in Arch.supported():
-            raise ValueError(
-                f"Arch '{arch}' is not available in"
-                " postmarketOS. If you would like to add it, see:"
-                " <https://postmarketos.org/newarch>"
-            )
-
-        # "chassis" validation
-        chassis_type = info["chassis"]
-        if chassis_type not in chassis_types:
-            raise RuntimeError(
-                f"Unknown chassis type '{chassis_type}', should"
-                f" be one of {', '.join(chassis_types)}. Fix this"
-                f" and try again: {path}"
-            )
-
-    def __init__(self, path: Path, kernel: Optional[str] = None):
-        ret = {}
-        with open(path) as handle:
-            for line in handle:
-                if not line.startswith("deviceinfo_"):
-                    continue
-                if "=" not in line:
-                    raise SyntaxError(f"{path}: No '=' found:\n\t{line}")
-                split = line.split("=", 1)
-                key = split[0][len("deviceinfo_") :]
-                value = split[1].replace('"', "").replace("\n", "")
-                ret[key] = value
-
-        ret = _parse_kernel_suffix(ret, ret["codename"], kernel)
-        Deviceinfo.__validate(ret, path)
-
-        for key, value in ret.items():
-            # FIXME: something to turn on and fix in the future
-            # if key not in Deviceinfo.__annotations__.keys():
-            #     logging.warning(f"deviceinfo: {key} is not a known attribute")
-            if key == "arch":
-                setattr(self, key, Arch.from_str(value))
-            else:
-                setattr(self, key, value)
-
-        if not self.flash_method:
-            self.flash_method = "none"
+    ret = _parse_kernel_suffix(args, ret, device, kernel)
+    sanity_check(ret, path)
+    return ret

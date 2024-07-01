@@ -1,7 +1,7 @@
 # Copyright 2023 Attila Szollosi
 # SPDX-License-Identifier: GPL-3.0-or-later
-from pathlib import Path
-from pmb.helpers import logging
+import glob
+import logging
 import re
 import os
 
@@ -9,8 +9,24 @@ import pmb.build
 import pmb.config
 import pmb.parse
 import pmb.helpers.pmaports
-import pmb.parse.kconfigcheck
 from pmb.helpers.exceptions import NonBugError
+
+
+def get_all_component_names():
+    """
+    Get the component names from kconfig_options variables in
+    pmb/config/__init__.py. This does not include the base options.
+
+    :returns: a list of component names, e.g. ["waydroid", "iwd", "nftables"]
+    """
+    prefix = "kconfig_options_"
+    ret = []
+
+    for key in pmb.config.__dict__.keys():
+        if key.startswith(prefix):
+            ret += [key.split(prefix, 1)[1]]
+
+    return ret
 
 
 def is_set(config, option):
@@ -34,7 +50,7 @@ def is_set_str(config, option, string):
     :param string: the expected string
     :returns: True if the check passed, False otherwise
     """
-    match = re.search("^CONFIG_" + option + '="(.*)"$', config, re.M)
+    match = re.search("^CONFIG_" + option + "=\"(.*)\"$", config, re.M)
     if match:
         return string == match.group(1)
     else:
@@ -50,7 +66,7 @@ def is_in_array(config, option, string):
     :param string: the string expected to be an element of the array
     :returns: True if the check passed, False otherwise
     """
-    match = re.search("^CONFIG_" + option + '="(.*)"$', config, re.M)
+    match = re.search("^CONFIG_" + option + "=\"(.*)\"$", config, re.M)
     if match:
         values = match.group(1).split(",")
         return string in values
@@ -58,7 +74,8 @@ def is_in_array(config, option, string):
         return False
 
 
-def check_option(component, details, config, config_path, option, option_value):
+def check_option(component, details, config, config_path, option,
+                 option_value):
     """
     Check, whether one kernel config option has a given value.
 
@@ -70,21 +87,16 @@ def check_option(component, details, config, config_path, option, option_value):
     :param option_value: expected value, e.g. True, "str", ["str1", "str2"]
     :returns: True if the check passed, False otherwise
     """
-
     def warn_ret_false(should_str):
         config_name = os.path.basename(config_path)
         if details:
-            logging.warning(
-                f"WARNING: {config_name}: CONFIG_{option} should"
-                f" {should_str} ({component}):"
-                f" https://wiki.postmarketos.org/wiki/kconfig#CONFIG_{option}"
-            )
+            logging.warning(f"WARNING: {config_name}: CONFIG_{option} should"
+                            f" {should_str} ({component}):"
+                            f" https://wiki.postmarketos.org/wiki/kconfig#CONFIG_{option}")
         else:
-            logging.warning(
-                f"WARNING: {config_name} isn't configured properly"
-                f" ({component}), run 'pmbootstrap kconfig check'"
-                " for details!"
-            )
+            logging.warning(f"WARNING: {config_name} isn't configured properly"
+                            f" ({component}), run 'pmbootstrap kconfig check'"
+                            " for details!")
         return False
 
     if isinstance(option_value, list):
@@ -98,18 +110,15 @@ def check_option(component, details, config, config_path, option, option_value):
         if option_value != is_set(config, option):
             return warn_ret_false("be set" if option_value else "*not* be set")
     else:
-        raise RuntimeError(
-            "kconfig check code can only handle booleans,"
-            f" strings and arrays. Given value {option_value}"
-            " is not supported. If you need this, please patch"
-            " pmbootstrap or open an issue."
-        )
+        raise RuntimeError("kconfig check code can only handle booleans,"
+                           f" strings and arrays. Given value {option_value}"
+                           " is not supported. If you need this, please patch"
+                           " pmbootstrap or open an issue.")
     return True
 
 
-def check_config_options_set(
-    config, config_path, config_arch, options, component, pkgver, details=False
-):
+def check_config_options_set(config, config_path, config_arch, options,
+                             component, pkgver, details=False):
     """
     Check, whether all the kernel config passes all rules of one component.
 
@@ -152,7 +161,8 @@ def check_config_options_set(
                     continue
 
             for option, option_value in options.items():
-                if not check_option(component, details, config, config_path, option, option_value):
+                if not check_option(component, details, config, config_path,
+                                    option, option_value):
                     ret = False
                     # Stop after one non-detailed error
                     if not details:
@@ -160,42 +170,66 @@ def check_config_options_set(
     return ret
 
 
-def check_config(config_path, config_arch, pkgver, categories: list, details=False):
+def check_config(config_path, config_arch, pkgver, components_list=[],
+                 details=False, enforce_check=True):
     """
     Check, whether one kernel config passes the rules of multiple components.
 
     :param config_path: full path to kernel config file
     :param config_arch: architecture name (alpine format, e.g. aarch64, x86_64)
     :param pkgver: kernel version
-    :param categories: what to check for, e.g. ["waydroid", "iwd"]
+    :param components_list: what to check for, e.g. ["waydroid", "iwd"]
     :param details: print all warnings if True, otherwise one per component
+    :param enforce_check: set to False to not fail kconfig check as long as
+                          everything in kconfig_options is set correctly, even
+                          if additional components are checked
     :returns: True if the check passed, False otherwise
     """
     logging.debug(f"Check kconfig: {config_path}")
     with open(config_path) as handle:
         config = handle.read()
 
-    if "default" not in categories:
-        categories += ["default"]
+    # Devices in all categories need basic options
+    # https://wiki.postmarketos.org/wiki/Device_categorization
+    components_list = ["postmarketOS"] + components_list
 
-    # Get all rules
-    rules: dict = {}
-    for category in categories:
-        rules |= pmb.parse.kconfigcheck.read_category(category)
-
-    # Check the rules of each category
-    ret = []
-    for category in rules.keys():
-        ret += [
-            check_config_options_set(
-                config, config_path, config_arch, rules[category], category, pkgver, details
-            )
+    # Devices in "community" or "main" need additional options
+    if "community" in components_list:
+        components_list += [
+            "containers",
+            "filesystems",
+            "iwd",
+            "netboot",
+            "nftables",
+            "usb_gadgets",
+            "waydroid",
+            "wireguard",
+            "zram",
         ]
 
-    return all(ret)
+    components = {}
+    for name in components_list:
+        if name == "postmarketOS":
+            pmb_config_var = "kconfig_options"
+        else:
+            pmb_config_var = f"kconfig_options_{name}"
+
+        components[name] = getattr(pmb.config, pmb_config_var, None)
+        assert components[name], f"invalid kconfig component name: {name}"
+
+    results = []
+    for component, options in components.items():
+        result = check_config_options_set(config, config_path, config_arch,
+                                          options, component, pkgver, details)
+        # We always enforce "postmarketOS" component and when explicitly
+        # requested
+        if enforce_check or component == "postmarketOS":
+            results += [result]
+
+    return all(results)
 
 
-def check(pkgname, components_list=[], details=False, must_exist=True):
+def check(args, pkgname, components_list=[], details=False, must_exist=True):
     """
     Check for necessary kernel config options in a package.
 
@@ -218,48 +252,37 @@ def check(pkgname, components_list=[], details=False, must_exist=True):
 
     # Read all kernel configs in the aport
     ret = True
-    aport: Path
-    try:
-        aport = pmb.helpers.pmaports.find("linux-" + flavor)
-    except RuntimeError as e:
-        if must_exist:
-            raise e
+    aport = pmb.helpers.pmaports.find(args, "linux-" + flavor, must_exist=must_exist)
+    if aport is None:
         return None
-    apkbuild = pmb.parse.apkbuild(aport / "APKBUILD")
+    apkbuild = pmb.parse.apkbuild(f"{aport}/APKBUILD")
     pkgver = apkbuild["pkgver"]
 
-    # Get categories from the APKBUILD
-    categories = []
-    for option in apkbuild["options"]:
-        if not option.startswith("pmb:kconfigcheck-"):
-            continue
-        category = option.split("-", 1)[1]
-        categories += [category]
+    # We only enforce optional checks for community & main devices
+    enforce_check = aport.split("/")[-2] in ["community", "main"]
 
-    for config_path in aport.glob("config-*"):
+    for name in get_all_component_names():
+        if f"pmb:kconfigcheck-{name}" in apkbuild["options"] and \
+                name not in components_list:
+            components_list += [name]
+
+    for config_path in glob.glob(aport + "/config-*"):
         # The architecture of the config is in the name, so it just needs to be
         # extracted
         config_name = os.path.basename(config_path)
         config_name_split = config_name.split(".")
 
         if len(config_name_split) != 2:
-            raise NonBugError(
-                f"{config_name} is not a valid kernel config"
-                "name. Ensure that the _config property in your "
-                "kernel APKBUILD has a . before the "
-                "architecture name, e.g. .aarch64 or .armv7, "
-                "and that there is no excess punctuation "
-                "elsewhere in the name."
-            )
+            raise NonBugError(f"{config_name} is not a valid kernel config"
+                              "name. Ensure that the _config property in your "
+                              "kernel APKBUILD has a . before the "
+                              "architecture name, e.g. .aarch64 or .armv7, "
+                              "and that there is no excess punctuation "
+                              "elsewhere in the name.")
 
         config_arch = config_name_split[1]
-        ret &= check_config(
-            config_path,
-            config_arch,
-            pkgver,
-            categories,
-            details=details,
-        )
+        ret &= check_config(config_path, config_arch, pkgver, components_list,
+                            details=details, enforce_check=enforce_check)
     return ret
 
 
@@ -308,7 +331,7 @@ def check_file(config_path, components_list=[], details=False):
     """
     arch = extract_arch(config_path)
     version = extract_version(config_path)
-    logging.debug(
-        f"Check kconfig: parsed arch={arch}, version={version} from " f"file: {config_path}"
-    )
-    return check_config(config_path, arch, version, components_list, details=details)
+    logging.debug(f"Check kconfig: parsed arch={arch}, version={version} from "
+                  f"file: {config_path}")
+    return check_config(config_path, arch, version, components_list,
+                        details=details)

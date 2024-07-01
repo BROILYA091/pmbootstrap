@@ -2,26 +2,23 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import os
-from pathlib import Path
 import time
 
-from pmb.types import PmbArgs
 import pmb.helpers.run
-import pmb.helpers.pmaports
 
 
-def replace(path: Path, old: str, new: str):
+def replace(path, old, new):
     text = ""
-    with path.open("r", encoding="utf-8") as handle:
+    with open(path, "r", encoding="utf-8") as handle:
         text = handle.read()
 
     text = text.replace(old, new)
 
-    with path.open("w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8") as handle:
         handle.write(text)
 
 
-def replace_apkbuild(args: PmbArgs, pkgname, key, new, in_quotes=False):
+def replace_apkbuild(args, pkgname, key, new, in_quotes=False):
     """Replace one key=value line in an APKBUILD and verify it afterwards.
 
     :param pkgname: package name, e.g. "hello-world"
@@ -30,30 +27,29 @@ def replace_apkbuild(args: PmbArgs, pkgname, key, new, in_quotes=False):
     :param in_quotes: expect the value to be in quotation marks ("")
     """
     # Read old value
-    path = pmb.helpers.pmaports.find(pkgname) / "APKBUILD"
+    path = pmb.helpers.pmaports.find(args, pkgname) + "/APKBUILD"
     apkbuild = pmb.parse.apkbuild(path)
     old = apkbuild[key]
 
     # Prepare old/new strings
     if in_quotes:
-        line_old = f'{key}="{old}"'
-        line_new = f'{key}="{new}"'
+        line_old = '{}="{}"'.format(key, old)
+        line_new = '{}="{}"'.format(key, new)
     else:
-        line_old = f"{key}={old}"
-        line_new = f"{key}={new}"
+        line_old = '{}={}'.format(key, old)
+        line_new = '{}={}'.format(key, new)
 
     # Replace
     replace(path, "\n" + line_old + "\n", "\n" + line_new + "\n")
 
     # Verify
-    pmb.parse.apkbuild.cache_clear()
+    del (pmb.helpers.other.cache["apkbuild"][path])
     apkbuild = pmb.parse.apkbuild(path)
     if apkbuild[key] != str(new):
-        raise RuntimeError(
-            f"Failed to set '{key}' for pmaport '{pkgname}'. Make sure"
-            f" that there's a line with exactly the string '{line_old}'"
-            f" and nothing else in: {path}"
-        )
+        raise RuntimeError("Failed to set '{}' for pmaport '{}'. Make sure"
+                           " that there's a line with exactly the string '{}'"
+                           " and nothing else in: {}".format(key, pkgname,
+                                                             line_old, path))
 
 
 def is_up_to_date(path_sources, path_target=None, lastmod_target=None):
@@ -68,7 +64,8 @@ def is_up_to_date(path_sources, path_target=None, lastmod_target=None):
     """
 
     if path_target and lastmod_target:
-        raise RuntimeError("Specify path_target *or* lastmod_target, not both!")
+        raise RuntimeError(
+            "Specify path_target *or* lastmod_target, not both!")
 
     lastmod_source = None
     for path_source in path_sources:
@@ -90,14 +87,15 @@ def is_older_than(path, seconds):
     return lastmod + seconds < time.time()
 
 
-def symlink(file: Path, link: Path):
+def symlink(args, file, link):
     """Check if the symlink is already present, otherwise create it."""
     if os.path.exists(link):
-        if os.path.islink(link) and os.path.realpath(os.readlink(link)) == os.path.realpath(file):
+        if (os.path.islink(link) and
+                os.path.realpath(os.readlink(link)) == os.path.realpath(file)):
             return
-        raise RuntimeError(f"File exists: {link}")
-    elif link.is_symlink():
-        link.unlink()
+        raise RuntimeError("File exists: " + link)
+    elif os.path.islink(link):
+        os.unlink(link)
 
     # Create the symlink
-    pmb.helpers.run.user(["ln", "-s", file, link])
+    pmb.helpers.run.user(args, ["ln", "-s", file, link])

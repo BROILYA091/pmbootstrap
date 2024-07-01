@@ -10,12 +10,13 @@ fi
 
 # shellcheck disable=SC2046
 vermin \
-	-t=3.9- \
+	-t=3.7- \
 	--backport argparse \
 	--backport configparser \
 	--backport enum \
 	--backport typing \
 	--lint \
+	--no-parse-comments \
 	--eval-annotations \
 	$(find . -name '*.py' \
 		-a -not -path "./.venv/*" \

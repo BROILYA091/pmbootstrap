@@ -1,14 +1,13 @@
 # Copyright 2023 Oliver Smith
 # SPDX-License-Identifier: GPL-3.0-or-later
 import datetime
-from pmb.helpers import logging
+import logging
 import os
 import re
 import readline
 import sys
 
 import pmb.config
-from pmb.core.context import get_context
 
 
 class ReadlineTabCompleter:
@@ -27,7 +26,8 @@ class ReadlineTabCompleter:
         # First time: build match list
         if iteration == 0:
             if input_text:
-                self.matches = [s for s in self.options if s and s.startswith(input_text)]
+                self.matches = [s for s in self.options
+                                if s and s.startswith(input_text)]
             else:
                 self.matches = self.options[:]
 
@@ -37,14 +37,8 @@ class ReadlineTabCompleter:
         return None
 
 
-def ask(
-    question="Continue?",
-    choices=["y", "n"],
-    default="n",
-    lowercase_answer=True,
-    validation_regex=None,
-    complete=None,
-):
+def ask(question="Continue?", choices=["y", "n"], default="n",
+        lowercase_answer=True, validation_regex=None, complete=None):
     """Ask a question on the terminal.
 
     :param question: display prompt
@@ -67,12 +61,13 @@ def ask(
         line = f"[{date}] {line}"
 
         if complete:
-            readline.parse_and_bind("tab: complete")
+            readline.parse_and_bind('tab: complete')
             delims = readline.get_completer_delims()
-            if "-" in delims:
-                delims = delims.replace("-", "")
+            if '-' in delims:
+                delims = delims.replace('-', '')
                 readline.set_completer_delims(delims)
-            readline.set_completer(ReadlineTabCompleter(complete).completer_func)
+            readline.set_completer(
+                ReadlineTabCompleter(complete).completer_func)
 
         ret = input(f"{line_color}: ")
 
@@ -97,28 +92,25 @@ def ask(
         if pattern.match(ret):
             return ret
 
-        logging.fatal(
-            "ERROR: Input did not pass validation (regex: "
-            + validation_regex
-            + "). Please try again."
-        )
+        logging.fatal("ERROR: Input did not pass validation (regex: " +
+                      validation_regex + "). Please try again.")
 
 
-def confirm(question="Continue?", default=False, no_assumptions=False):
+def confirm(args, question="Continue?", default=False, no_assumptions=False):
     """Convenience wrapper around ask for simple yes-no questions with validation.
 
     :param no_assumptions: ask for confirmation, even if "pmbootstrap -y' is set
     :returns: True for "y", False for "n"
     """
     default_str = "y" if default else "n"
-    if get_context().assume_yes and not no_assumptions:
+    if args.assume_yes and not no_assumptions:
         logging.info(question + " (y/n) [" + default_str + "]: y")
         return True
     answer = ask(question, ["y", "n"], default_str, True, "(y|n)")
     return answer == "y"
 
 
-def progress_print(progress):
+def progress_print(args, progress):
     """Print a snapshot of a progress bar to STDOUT.
 
     Call progress_flush to end  printing progress and clear the line. No output is printed in
@@ -135,16 +127,16 @@ def progress_print(progress):
     filled = "\u2588" * chars
     empty = " " * (width - chars)
     percent = int(progress * 100)
-    if pmb.config.is_interactive and not get_context().details_to_stdout:
+    if pmb.config.is_interactive and not args.details_to_stdout:
         sys.stdout.write(f"\u001b7{percent:>3}% {filled}{empty}")
         sys.stdout.flush()
         sys.stdout.write("\u001b8\u001b[0K")
 
 
-def progress_flush():
+def progress_flush(args):
     """Finish printing a progress bar.
 
     This will erase the line. Does nothing in non-interactive mode.
     """
-    if pmb.config.is_interactive and not get_context().details_to_stdout:
+    if pmb.config.is_interactive and not args.details_to_stdout:
         sys.stdout.flush()

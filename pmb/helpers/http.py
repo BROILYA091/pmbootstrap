@@ -2,22 +2,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import hashlib
 import json
-from pmb.helpers import logging
+import logging
 import os
-from pathlib import Path
 import shutil
 import urllib.request
 
-from pmb.core.context import get_context
 import pmb.helpers.run
 
 
-def cache_file(prefix: str, url: str) -> Path:
-    prefix = prefix.replace("/", "_")
-    return Path(f"{prefix}_{hashlib.sha256(url.encode('utf-8')).hexdigest()}")
-
-
-def download(url, prefix, cache=True, loglevel=logging.INFO, allow_404=False):
+def download(args, url, prefix, cache=True, loglevel=logging.INFO,
+             allow_404=False):
     """Download a file to disk.
 
     :param url: the http(s) address of to the file to download
@@ -34,20 +28,22 @@ def download(url, prefix, cache=True, loglevel=logging.INFO, allow_404=False):
     :returns: path to the downloaded file in the cache or None on 404
     """
     # Create cache folder
-    context = get_context()
-    if not os.path.exists(context.config.work / "cache_http"):
-        pmb.helpers.run.user(["mkdir", "-p", context.config.work / "cache_http"])
+    if not os.path.exists(args.work + "/cache_http"):
+        pmb.helpers.run.user(args, ["mkdir", "-p", args.work + "/cache_http"])
 
     # Check if file exists in cache
-    path = context.config.work / "cache_http" / cache_file(prefix, url)
+    prefix = prefix.replace("/", "_")
+    path = (args.work + "/cache_http/" + prefix + "_" +
+            hashlib.sha256(url.encode("utf-8")).hexdigest())
     if os.path.exists(path):
         if cache:
             return path
-        pmb.helpers.run.user(["rm", path])
+        pmb.helpers.run.user(args, ["rm", path])
 
     # Offline and not cached
-    if context.offline:
-        raise RuntimeError("File not found in cache and offline flag is" f" enabled: {url}")
+    if args.offline:
+        raise RuntimeError("File not found in cache and offline flag is"
+                           f" enabled: {url}")
 
     # Download the file
     logging.log(loglevel, "Download " + url)
@@ -71,9 +67,9 @@ def retrieve(url, headers=None, allow_404=False):
 
     :param url: the http(s) address of to the resource to fetch
     :param headers: dict of HTTP headers to use
-    :param allow_404: do not raise an exception when the server responds with a
+    :param allow_404: do not raise an exception when the server responds with a 
         404 Not Found error. Only display a warning
-
+    
     :returns: str with the content of the response
     """
     # Download the file

@@ -1,10 +1,9 @@
 # Copyright 2023 Lary Gibaud
 # SPDX-License-Identifier: GPL-3.0-or-later
 import re
-from typing import Optional
 
 
-def arm_big_little_first_group_ncpus() -> Optional[int]:
+def arm_big_little_first_group_ncpus():
     """
     Infer from /proc/cpuinfo on aarch64 if this is a big/little architecture
     (if there is different processor models) and the number of cores in the
@@ -18,7 +17,7 @@ def arm_big_little_first_group_ncpus() -> Optional[int]:
     counter = 0
     part = None
 
-    with open("/proc/cpuinfo") as cpuinfo:
+    with open('/proc/cpuinfo', 'r') as cpuinfo:
         for line in cpuinfo:
             match = pattern.match(line)
             if match:
