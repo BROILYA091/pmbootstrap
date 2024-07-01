@@ -558,7 +558,7 @@ git_repos = {
     ],
     "pmaports": [
         "https://github.com/BROILYA091/pmaports.git",
-        "git@gitlab.com:postmarketos/pmaports.git",
+        "git@github.com:BROILYA091/pmaports.git",
     ],
 }
 
