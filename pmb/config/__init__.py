@@ -557,7 +557,7 @@ git_repos = {
         "git@gitlab.alpinelinux.org:alpine/aports.git",
     ],
     "pmaports": [
-        "https://https://github.com/BROILYA091/pmaports.git",
+        "https://github.com/BROILYA091/pmaports.git",
         "git@gitlab.com:postmarketos/pmaports.git",
     ],
 }
