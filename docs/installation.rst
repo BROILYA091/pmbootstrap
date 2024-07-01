@@ -40,7 +40,7 @@ Follow this section if your Linux distribution doesn't have pmbootstrap packaged
 
 .. code-block::
    
-   $ git clone --depth=1 https://gitlab.com/postmarketOS/pmbootstrap.git
+   $ git clone --depth=1 https://github.com/BROILYA091/pmbootstrap.git
    $ mkdir -p ~/.local/bin
    $ ln -s "$PWD/pmbootstrap/pmbootstrap.py" ~/.local/bin/pmbootstrap
    $ pmbootstrap --version

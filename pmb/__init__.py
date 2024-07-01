@@ -122,7 +122,7 @@ def main() -> int:
         print_log_hint()
         print()
         print("Before you report this error, ensure that pmbootstrap is " "up to date.")
-        print("Find the latest version here:" " https://gitlab.com/postmarketOS/pmbootstrap/-/tags")
+        print("Find the latest version here:" " https://github.com/BROILYA091/pmbootstrap/-/tags")
         print(f"Your version: {__version__}")
         return 1
 

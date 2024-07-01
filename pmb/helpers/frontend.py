@@ -206,7 +206,7 @@ def chroot(args: PmbArgs):
             "--install-blockdev is deprecated for the chroot command"
             " and will be removed in a future release. If you need this"
             " for some reason, please open an issue on"
-            " https://gitlab.com/postmarketOS/pmbootstrap.git"
+            " https://github.com/BROILYA091/pmbootstrap.git"
         )
         size_boot = 128  # 128 MiB
         size_root = 4096  # 4 GiB
